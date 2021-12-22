@@ -131,5 +131,11 @@ dmypy.json
 # Data folder
 data/*
 
+# Assets folder
+assets/*
+
+# References folder
+references/*
+
 # Draw.io files
-.drawio
+*.drawio
