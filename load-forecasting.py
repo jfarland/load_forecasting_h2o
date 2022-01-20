@@ -12,16 +12,17 @@ async def serve(q: Q):
 
         # train WaveML Model using H2O-3 AutoML
         q.client.wave_model = build_model(
-            train_df = q.client.train_df,
+            train_df = q.client.train_agg,
             target_column = 'kw',
+            #feature_columns = ["hour", "LCLid", "temperature"],
             model_type = ModelType.H2O3,
-            _h2o3_max_runtime_secs = 60*5,
-            _h2o3_nfolds = 2
+            _h2o3_max_runtime_secs = 60*1,
+            #_h2o3_nfolds = 1
         )
         
         model_id = q.client.wave_model.model.model_id
-        #accuracy = round(100 - q.client.wave_model.model.mean_per_class_error() * 100, 2)
-        accuracy = 100
+        accuracy = round(q.client.wave_model.model.mae(), 2)
+        #accuracy = 100
 
         # show training details and prediction option
         q.page['inputs'].items[1].buttons.items[1].button.disabled = False
@@ -32,8 +33,56 @@ async def serve(q: Q):
         q.page['inputs'].items[4].text.content = ''
 
     elif q.args.predict:
+
+        q.client.test_df["timestamp"] = pd.to_datetime(q.client.test_df["timestamp"])
+
+        test_agg = (q.client.test_df.drop("sensor_id", axis = 1).groupby(["timestamp", "date", "hour"])
+            .agg(
+                kw = ("kw", 'mean'),
+                temperature = ("temperature", 'mean'),
+                humidity = ("humidity", 'mean'),
+                dewPoint = ("dewPoint", 'mean'),
+                visibility = ("visibility", 'mean'),
+                windBearing = ("windBearing", 'mean'),
+                windSpeed = ("windSpeed", 'mean'),
+                pressure = ("pressure", 'mean')
+            ))
+
+        test_agg.reset_index(inplace = True)
+        test_agg["label"] = "forecast"
+        test_agg["timestamp"] = test_agg.timestamp.astype(str) # cast back to string for JSON serialization :( ...
+
         # predict on test data
-        preds = q.client.wave_model.predict(test_df=q.client.test_df)
+        preds = q.client.wave_model.predict(test_agg)
+
+        test_agg = pd.concat([pd.DataFrame({'kw': preds}), test_agg.drop("kw", axis = 1)], axis = 1)
+        test_agg["kw"] = test_agg["kw"].astype(float)
+        #print(test_agg.head())
+
+        #test_df["timestamp"] = pd.to_datetime(test_df["timestamp"])
+        #test_agg =  test_df.drop("sensor_id", axis = 1).groupby("timestamp")["kw"].agg(["mean"])
+        #test_agg["label"] = "forecast"
+        #test_agg["timestamp"] = test_agg.index.astype(str) # cast back to string for JSON serialization :( ...
+        #test_agg = test_agg.reset_index(drop = True)
+
+        test_agg_lim = test_agg[["kw", "label", "timestamp"]]
+        test_agg_lim.columns = ['kw', 'label','timestamp']
+
+        q.client.test_agg = test_agg
+        q.client.test_agg_lim = test_agg_lim
+
+        output = pd.concat([q.client.train_agg_lim, test_agg_lim])
+        #output.head()
+
+        # Create data buffer using training data
+        ts_plot_data = data('kw label timestamp', rows = [tuple(x) for x in output.to_numpy()])
+
+        q.page['timeseries'] = ui.plot_card(box = ui.box('timeseries', height = '600px'), 
+           title = 'Interconnected Grid Demand',
+           data = ts_plot_data, # TODO figure out the best way to manage memory here
+           plot = ui.plot([
+               ui.mark(type='point', x_scale='time',  x='=timestamp', y='=kw', color='=label', y_min=0, color_range="#3399FF #FF9966", y_title="kWh")])
+           )
 
         # show predictions
         q.page['inputs'].items[2].message_bar.text = 'Prediction successfully completed!'
@@ -41,11 +90,12 @@ async def serve(q: Q):
             {preds[0]} <br /> {preds[1]} <br /> {preds[2]}'''
 
     else:
+
         # prepare sample train and test dataframes
 
         # TODO: store the energy + weather data in a database format (e.g., Wave DB, or NoSQL @ scale)
-        q.client.train_df = pd.read_csv("data/train.csv")
-        q.client.test_df = pd.read_csv("data/test.csv")
+        train_df = pd.read_csv("data/train.csv")
+        test_df = pd.read_csv("data/test.csv")
 
         #q.client.train_df, q.client.test_df = train_test_split(data, train_size=0.8)
 
@@ -93,15 +143,33 @@ async def serve(q: Q):
                 ui.text(content='')
         ])
 
-        q.client.train_df["timestamp"] = pd.to_datetime(q.client.train_df["timestamp"])
-        train_agg =  q.client.train_df.drop("sensor_id", axis = 1).groupby("timestamp")["kw"].agg(["mean"])
+        train_df["timestamp"] = pd.to_datetime(train_df["timestamp"])
+
+        train_agg = (train_df.drop("sensor_id", axis = 1).groupby(["timestamp", "date", "hour"])
+            .agg(
+                kw = ("kw", 'mean'),
+                temperature = ("temperature", 'mean'),
+                humidity = ("humidity", 'mean'),
+                dewPoint = ("dewPoint", 'mean'),
+                visibility = ("visibility", 'mean'),
+                windBearing = ("windBearing", 'mean'),
+                windSpeed = ("windSpeed", 'mean'),
+                pressure = ("pressure", 'mean')
+            ))
+
+        train_agg.reset_index(inplace = True)
         train_agg["label"] = "historical"
-        train_agg["timestamp"] = train_agg.index.astype(str) # cast back to string for JSON serialization :( ...
-        train_agg = train_agg.reset_index(drop = True)
-        train_agg.columns = ['kw', 'label','timestamp']
+        train_agg["timestamp"] = train_agg.timestamp.astype(str) # cast back to string for JSON serialization :( ...
+
+        train_agg_lim = train_agg[["kw", "label", "timestamp"]]
+        train_agg_lim.columns = ['kw', 'label','timestamp']
+
+        q.client.train_agg = train_agg
+        q.client.train_agg_lim = train_agg_lim
+        q.client.test_df = test_df
 
         # Create data buffer using training data
-        ts_plot_data = data('kw label timestamp', rows = [tuple(x) for x in train_agg.to_numpy()])
+        ts_plot_data = data('kw label timestamp', rows = [tuple(x) for x in train_agg_lim.to_numpy()])
    
         # Time Series Plots TODO: this should show the time series training data, and predictions when predicted
         # Reference: https://wave.h2o.ai/docs/examples/plot-line-groups
@@ -110,7 +178,7 @@ async def serve(q: Q):
             #data = data('kw label timestamp', rows = train_agg.head().to_dict("list")), # TODO figure out the best way to manage memory here
             data = ts_plot_data, # TODO figure out the best way to manage memory here
             plot = ui.plot([
-                ui.mark(type = 'line', x_scale = 'time',  x = '=timestamp', y = '=kw', color = '=label', y_min = 0, color_domain=["#3399FF #FF9966"])])
+                ui.mark(type='point', x_scale='time',  x='=timestamp', y='=kw', color='=label', y_min=0, color_range="#3399FF #FF9966", y_title="kWh")])
         )
 
         # Time Series Segmentation Card
